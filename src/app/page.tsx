@@ -16,6 +16,15 @@ type HistoryEntry = {
   ads: AdItem[];
 };
 
+type FavoriteAd = {
+  id: string;
+  title: string;
+  description: string;
+  cta: string;
+  createdAt: number;
+  source?: string; // URL ali label iz zgodovine
+};
+
 export default function Home() {
   const [url, setUrl] = useState("");
   const [loading, setLoading] = useState(false);
@@ -27,6 +36,10 @@ export default function Home() {
   const [history, setHistory] = useState<HistoryEntry[]>([]);
   const [selectedHistoryId, setSelectedHistoryId] = useState<string | null>(null);
   const [sidebarOpen] = useState(true);
+  const [favorites, setFavorites] = useState<FavoriteAd[]>([]);
+  const [selectedFavorites, setSelectedFavorites] = useState<Set<string>>(new Set());
+  const [sidebarTab, setSidebarTab] = useState<"history" | "favorites">("history");
+  const [recentlyAddedFavorites, setRecentlyAddedFavorites] = useState<Set<string>>(new Set());
 
   function loadHistory() {
     try {
@@ -40,6 +53,21 @@ export default function Home() {
   function persistHistory(next: HistoryEntry[]) {
     try {
       localStorage.setItem("hs_ads_history", JSON.stringify(next));
+    } catch {}
+  }
+
+  function loadFavorites() {
+    try {
+      const raw = localStorage.getItem("hs_ads_favorites");
+      if (!raw) return;
+      const parsed = JSON.parse(raw);
+      if (Array.isArray(parsed)) setFavorites(parsed);
+    } catch {}
+  }
+
+  function persistFavorites(next: FavoriteAd[]) {
+    try {
+      localStorage.setItem("hs_ads_favorites", JSON.stringify(next));
     } catch {}
   }
 
@@ -94,6 +122,114 @@ export default function Home() {
     navigator.clipboard.writeText(text);
   }
 
+  function isAdInFavorites(ad: AdItem): boolean {
+    return favorites.some(fav => 
+      fav.title === ad.title && 
+      fav.description === ad.description && 
+      fav.cta === ad.cta
+    );
+  }
+
+  function addToFavorites(ad: AdItem, source?: string) {
+    // Preveri, ali je oglas že v favorite
+    if (isAdInFavorites(ad)) {
+      return; // Ne dodajaj podvojenih oglasov
+    }
+
+    const favoriteAd: FavoriteAd = {
+      id: crypto.randomUUID(),
+      title: ad.title,
+      description: ad.description,
+      cta: ad.cta,
+      createdAt: Date.now(),
+      source,
+    };
+    setFavorites((prev) => {
+      const next = [favoriteAd, ...prev];
+      persistFavorites(next);
+      return next;
+    });
+
+    // Dodaj vizualno povratno informacijo
+    const adKey = `${ad.title}-${ad.description}-${ad.cta}`;
+    setRecentlyAddedFavorites((prev) => {
+      const next = new Set(prev);
+      next.add(adKey);
+      return next;
+    });
+
+    // Odstrani vizualno povratno informacijo po 2 sekundah
+    setTimeout(() => {
+      setRecentlyAddedFavorites((prev) => {
+        const next = new Set(prev);
+        next.delete(adKey);
+        return next;
+      });
+    }, 2000);
+  }
+
+  function removeFromFavorites(id: string) {
+    setFavorites((prev) => {
+      const next = prev.filter((fav) => fav.id !== id);
+      persistFavorites(next);
+      return next;
+    });
+    setSelectedFavorites((prev) => {
+      const next = new Set(prev);
+      next.delete(id);
+      return next;
+    });
+  }
+
+  function toggleFavoriteSelection(id: string) {
+    setSelectedFavorites((prev) => {
+      const next = new Set(prev);
+      if (next.has(id)) {
+        next.delete(id);
+      } else {
+        next.add(id);
+      }
+      return next;
+    });
+  }
+
+  function exportSelectedToCSV() {
+    const selectedFavs = favorites.filter((fav) => selectedFavorites.has(fav.id));
+    if (selectedFavs.length === 0) return;
+
+    const csvContent = [
+      ["Naslov", "Opis", "CTA", "Vir", "Datum"],
+      ...selectedFavs.map((fav) => [
+        fav.title,
+        fav.description.replace(/\n/g, " "),
+        fav.cta,
+        fav.source || "",
+        new Date(fav.createdAt).toLocaleString(),
+      ]),
+    ]
+      .map((row) => row.map((cell) => `"${String(cell).replace(/"/g, '""')}"`).join(","))
+      .join("\n");
+
+    const blob = new Blob([csvContent], { type: "text/csv;charset=utf-8;" });
+    const link = document.createElement("a");
+    const url = URL.createObjectURL(blob);
+    link.setAttribute("href", url);
+    link.setAttribute("download", `facebook-ads-export-${new Date().toISOString().split("T")[0]}.csv`);
+    link.style.visibility = "hidden";
+    document.body.appendChild(link);
+    link.click();
+    document.body.removeChild(link);
+  }
+
+  function selectAllFavorites() {
+    const allFavoriteIds = new Set(favorites.map(fav => fav.id));
+    setSelectedFavorites(allFavoriteIds);
+  }
+
+  function deselectAllFavorites() {
+    setSelectedFavorites(new Set());
+  }
+
   async function generateVariants(base: AdItem, _index: number) {
     try {
       setLoading(true);
@@ -119,9 +255,10 @@ export default function Home() {
     }
   }
 
-  // naloži zgodovino po montaži na klientu
+  // naloži zgodovino in favorite po montaži na klientu
   useEffect(() => {
     loadHistory();
+    loadFavorites();
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
@@ -131,25 +268,124 @@ export default function Home() {
         {/* Sidebar */}
         <aside className={`hidden md:block w-72 shrink-0 ${sidebarOpen ? "" : "opacity-70"}`}>
           <div className="sticky top-6">
-            <div className="mb-3 flex items-center justify-between">
-              <h2 className="text-sm font-medium text-white/80">Zgodovina</h2>
-              <button onClick={() => { setHistory([]); persistHistory([]); }} className="text-xs text-white/50 hover:text-white/80">Počisti</button>
+            {/* Tab Navigation */}
+            <div className="flex mb-3 border-b border-white/10">
+              <button
+                onClick={() => setSidebarTab("history")}
+                className={`flex-1 text-sm font-medium py-2 px-3 text-center ${
+                  sidebarTab === "history" 
+                    ? "text-white border-b-2 border-white/30" 
+                    : "text-white/60 hover:text-white/80"
+                }`}
+              >
+                Zgodovina
+              </button>
+              <button
+                onClick={() => setSidebarTab("favorites")}
+                className={`flex-1 text-sm font-medium py-2 px-3 text-center ${
+                  sidebarTab === "favorites" 
+                    ? "text-white border-b-2 border-white/30" 
+                    : "text-white/60 hover:text-white/80"
+                }`}
+              >
+                Favorite ({favorites.length})
+              </button>
             </div>
-            <div className="space-y-2">
-              {history.length === 0 && (
-                <div className="text-xs text-white/40">Ni shranjenih vnosov.</div>
-              )}
-              {history.map((h) => (
-                <button
-                  key={h.id}
-                  onClick={() => { setSelectedHistoryId(h.id); setAds(h.ads); }}
-                  className={`w-full text-left rounded-lg border border-white/10 px-3 py-2 hover:bg-white/5 ${selectedHistoryId === h.id ? "bg-white/10" : ""}`}
-                >
-                  <div className="text-sm truncate">{h.label}</div>
-                  <div className="text-[10px] text-white/50">{new Date(h.createdAt).toLocaleString()}</div>
-                </button>
-              ))}
-            </div>
+
+            {/* History Tab */}
+            {sidebarTab === "history" && (
+              <>
+                <div className="mb-3 flex items-center justify-between">
+                  <h2 className="text-sm font-medium text-white/80">Zgodovina</h2>
+                  <button onClick={() => { setHistory([]); persistHistory([]); }} className="text-xs text-white/50 hover:text-white/80">Počisti</button>
+                </div>
+                <div className="space-y-2">
+                  {history.length === 0 && (
+                    <div className="text-xs text-white/40">Ni shranjenih vnosov.</div>
+                  )}
+                  {history.map((h) => (
+                    <button
+                      key={h.id}
+                      onClick={() => { setSelectedHistoryId(h.id); setAds(h.ads); }}
+                      className={`w-full text-left rounded-lg border border-white/10 px-3 py-2 hover:bg-white/5 ${selectedHistoryId === h.id ? "bg-white/10" : ""}`}
+                    >
+                      <div className="text-sm truncate">{h.label}</div>
+                      <div className="text-[10px] text-white/50">{new Date(h.createdAt).toLocaleString()}</div>
+                    </button>
+                  ))}
+                </div>
+              </>
+            )}
+
+            {/* Favorites Tab */}
+            {sidebarTab === "favorites" && (
+              <>
+                <div className="mb-3 flex items-center justify-between">
+                  <h2 className="text-sm font-medium text-white/80">Favorite oglasi</h2>
+                  <div className="flex gap-2">
+                    {favorites.length > 0 && (
+                      <button
+                        onClick={selectedFavorites.size === favorites.length ? deselectAllFavorites : selectAllFavorites}
+                        className="text-xs text-blue-400 hover:text-blue-300"
+                      >
+                        {selectedFavorites.size === favorites.length ? "Odznači vse" : "Označi vse"}
+                      </button>
+                    )}
+                    {selectedFavorites.size > 0 && (
+                      <button
+                        onClick={exportSelectedToCSV}
+                        className="text-xs text-emerald-400 hover:text-emerald-300"
+                      >
+                        Export CSV ({selectedFavorites.size})
+                      </button>
+                    )}
+                    <button 
+                      onClick={() => { setFavorites([]); persistFavorites([]); setSelectedFavorites(new Set()); }} 
+                      className="text-xs text-white/50 hover:text-white/80"
+                    >
+                      Počisti
+                    </button>
+                  </div>
+                </div>
+                <div className="space-y-2">
+                  {favorites.length === 0 && (
+                    <div className="text-xs text-white/40">Ni shranjenih favorite oglasov.</div>
+                  )}
+                  {favorites.map((fav) => (
+                    <div
+                      key={fav.id}
+                      className={`rounded-lg border border-white/10 p-3 hover:bg-white/5 ${
+                        selectedFavorites.has(fav.id) ? "bg-white/10" : ""
+                      }`}
+                    >
+                      <div className="flex items-start gap-2">
+                        <input
+                          type="checkbox"
+                          checked={selectedFavorites.has(fav.id)}
+                          onChange={() => toggleFavoriteSelection(fav.id)}
+                          className="mt-1 rounded border-white/20 bg-transparent"
+                        />
+                        <div className="flex-1 min-w-0">
+                          <div className="text-sm font-medium truncate">{fav.title}</div>
+                          <div className="text-xs text-white/60 mt-1 line-clamp-2">{fav.description}</div>
+                          <div className="text-[10px] text-white/50 mt-1">
+                            {fav.source && `${fav.source} • `}
+                            {new Date(fav.createdAt).toLocaleString()}
+                          </div>
+                        </div>
+                        <button
+                          onClick={() => removeFromFavorites(fav.id)}
+                          className="text-white/40 hover:text-red-400 text-xs"
+                          title="Odstrani iz favorite"
+                        >
+                          ×
+                        </button>
+                      </div>
+                    </div>
+                  ))}
+                </div>
+              </>
+            )}
           </div>
         </aside>
 
@@ -262,12 +498,28 @@ export default function Home() {
                 <p className="text-sm text-white/80 mb-4 whitespace-pre-wrap">{ad.description}</p>
                 <span className="inline-block text-xs rounded bg-white/10 px-2 py-1">CTA: {ad.cta}</span>
               </div>
-              <button
-                onClick={() => copyAd(ad)}
-                className="mt-4 rounded-md border border-white/15 px-3 py-2 text-sm hover:bg-white/10"
-              >
-                Copy
-              </button>
+              <div className="flex gap-2 mt-4">
+                <button
+                  onClick={() => copyAd(ad)}
+                  className="flex-1 rounded-md border border-white/15 px-3 py-2 text-sm hover:bg-white/10"
+                >
+                  Copy
+                </button>
+                <button
+                  onClick={() => addToFavorites(ad, selectedHistoryId ? history.find(h => h.id === selectedHistoryId)?.label : undefined)}
+                  className={`rounded-md border px-3 py-2 text-sm transition-all duration-200 ${
+                    isAdInFavorites(ad)
+                      ? "border-green-400/50 text-green-300 bg-green-400/10"
+                      : recentlyAddedFavorites.has(`${ad.title}-${ad.description}-${ad.cta}`)
+                      ? "border-green-400/50 text-green-300 bg-green-400/20 animate-pulse"
+                      : "border-yellow-400/30 text-yellow-300 hover:bg-yellow-400/10"
+                  }`}
+                  title={isAdInFavorites(ad) ? "Že v favorite" : "Dodaj med favorite"}
+                  disabled={isAdInFavorites(ad)}
+                >
+                  {isAdInFavorites(ad) ? "✅" : recentlyAddedFavorites.has(`${ad.title}-${ad.description}-${ad.cta}`) ? "✅" : "⭐"}
+                </button>
+              </div>
               <button
                 onClick={() => generateVariants(ad, idx)}
                 disabled={loading}
